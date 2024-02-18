@@ -1,21 +1,13 @@
 import os
-
-import torch.nn as nn
 import numpy as np
 import argparse
 import torch
 from tqdm import tqdm
 from datetime import datetime, timedelta
-import torch.optim as optim
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-from models import Bankruptcy, pct, reg_exp, TFROM, oracle, FairRec, FairRecPlus, CPFair, min_regularizer, k_neighbor, Welf, ROAP, P_MMF, popular
-from recbole.quick_start.quick_start import run_recbole
+from models import Bankruptcy, gru
 import math
 import bankrupt as bkr
-from random import choice
-gpu_list = ['0','1','2','3']
-os.environ["CUDA_VISIBLE_DEVICES"] = choice(gpu_list)
 
 '''
 TODO:
@@ -153,10 +145,6 @@ class DatasetStats:
         self.provider_field = ''
 
     def load_from_file(self, file_path):
-        # self.UI_matrix = np.load(os.path.join(file_path, args.dataset, args.dataset + '.npy'))
-        # self.UI_matrix = sigmoid(self.UI_matrix)
-
-
         processed_data_path = os.path.join(file_path, args.dataset, args.dataset + '.inter')
         self.inter_dataframe = pd.read_csv(processed_data_path, sep='\t')
         # table head:review_id:token	user_id:token	business_id:token	stars:float	useful:float funny:float	cool:float	date:float
@@ -180,9 +168,6 @@ class DatasetStats:
         self.provider_item_counts = np.array(unique_item_datas.groupby(self.provider_field)[self.iid_field].count())
         print(f'provider-item-count:{self.provider_item_counts}')
         self.item2provider = {x: y for x, y in zip(tmp[self.iid_field], tmp[self.provider_field])}
-        # if args.dataset == 'KuaiRec':
-        #     self.item2provider[1225] = 0
-        # A is item-provider matrix
         A = np.zeros((self.item_num, self.provider_num))
         iid2pid = []
         for i in range(self.item_num):
@@ -205,38 +190,14 @@ def choose_model(dataset):
     return fairness_model
 
 
-def get_train_ui_matrix(dataset, train_df, date, ori_train_ui_matrix):
-    # get 10 days data before date
+def get_train_ui_matrix(date):
     date = pd.to_datetime(date).date()
-    train_df = train_df[[dataset.uid_field, dataset.iid_field, dataset.label_field, dataset.time_field]]
 
-
-    temp_df_save_path = os.path.join('temp_data', 'inter', args.dataset)
     npy_path = os.path.join('temp_data', 'npy', args.dataset)
-    if not os.path.exists(npy_path):
-        os.makedirs(npy_path)
-    if not os.path.exists(temp_df_save_path):
-        os.makedirs(temp_df_save_path)
 
     npy_name = args.base_model + '_' + args.dataset + '_' + f'top{args.topk}' + '_' + date.strftime("%Y-%m-%d") + '.npy'
-    if os.path.exists(os.path.join(npy_path, npy_name)):
-        train_ui_matrix = np.load(os.path.join(npy_path, npy_name))
+    train_ui_matrix = np.load(os.path.join(npy_path, npy_name))
 
-    else:
-
-        users_ori = train_df[dataset.uid_field].unique().astype(str).tolist()
-        items_ori = train_df[dataset.iid_field].unique().astype(str).tolist()
-        train_df.to_csv(os.path.join(temp_df_save_path, args.dataset + '.inter'), sep='\t', index=False)
-
-        config_file_list = args.config_files.strip().split(' ') if args.config_files else None
-        train_result = run_recbole(model=args.base_model, dataset=args.dataset,
-                                   config_file_list=config_file_list,
-                                   big_ui_matrix=ori_train_ui_matrix,
-                                   users_ori=users_ori,
-                                   items_ori=items_ori)
-        train_ui_matrix = train_result['ui_matrix']  # update the train ui matrix
-        print(f'test result:{train_result["test_result"]}')
-        np.save(os.path.join(npy_path, npy_name), train_ui_matrix)  # save npy
     return train_ui_matrix
 
 
@@ -250,53 +211,6 @@ def min_max_normalize(matrix):
 
 
 
-class GRUModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(GRUModel, self).__init__()
-        self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        out, _ = self.gru(x)
-        out = self.fc(out[:, -1, :])  # Take the output from the last time step
-        return out
-
-
-    def user_traffic_prediction(history_traffic):
-        input_size = 1  # n_features
-        hidden_size = 24
-        output_size = 7
-        n_step = 30
-
-
-
-        data_np = np.array(history_traffic).reshape(-1, 1)
-        scaler = MinMaxScaler(feature_range=(0, 1))
-
-        data_scaled = scaler.fit_transform(data_np)
-
-        X_data = data_scaled[-n_step:]
-        X_data = torch.tensor(X_data, dtype=torch.float32).view(1, -1, 1)
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
-        num_epochs = 10
-        for epoch in range(num_epochs):
-            optimizer.zero_grad()
-            outputs = model(X_data[:-1])
-            loss = criterion(outputs, X_data[1:])
-            loss.backward()
-            optimizer.step()
-            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
-
-
-        loaded_model = GRUModel(input_size, hidden_size, output_size)
-        loaded_model.load_state_dict(torch.load('gru_model.pth'))
-        loaded_model.eval()
-
-        predict_data = loaded_model(X_data)
-
-        return scaler.inverse_transform(predict_data.detach().numpy())
-
 
 
 def run_baseline(dataset, model):
@@ -306,13 +220,12 @@ def run_baseline(dataset, model):
 
     inter_data = dataset.inter_dataframe
 
-    train_ui_matrix = np.zeros((dataset.user_num, dataset.item_num),  dtype=float)
     column_names = ['userid:token', 'interaction_time',
                     'NDCG_sui',
                    'recommend_list']
     result_df = pd.DataFrame(columns=column_names)
     if args.fairness_model=='Bankruptcy':
-        df_filename = ('./df/run_baseline4' + args.fairness_model + '_'+args.dataset+ '_'+
+        df_filename = ('./run_RPF' + args.fairness_model + '_'+args.dataset+ '_'+
                        args.base_model + f'_interval{args.interval_len}_top{args.topk}_estate{args.total_estate}_theta{args.theta}'+'.csv')
     result_df.to_csv(df_filename, index=False, header=True)
 
@@ -326,10 +239,7 @@ def run_baseline(dataset, model):
     print(f'test len:{len(test_df)}')
     test_df = test_df[test_df[dataset.label_field] == 1]
 
-    train_ui_matrix = get_train_ui_matrix(dataset,
-                                          train_df,
-                                          date=train_test_split_date,
-                                          ori_train_ui_matrix=train_ui_matrix)
+    train_ui_matrix = get_train_ui_matrix(date=train_test_split_date)
     sig_train_ui_matrix = min_max_normalize(train_ui_matrix)
 
     upcoming_user_list = test_df[[dataset.uid_field,
@@ -338,12 +248,15 @@ def run_baseline(dataset, model):
                                   dataset.iid_field,
                                   dataset.label_field]]
     upcoming_user_list.set_index('interaction_time', inplace=True)
-
+    train_df.set_index('interaction_time', inplace=True)
     test_providerLen = np.array(upcoming_user_list.groupby(dataset.provider_field).size().values)
     print(f'test provider len: {test_providerLen}')
+
+    # divide by interval len
     time_interval_len = args.interval_len + 'H'
     result_dfs = [group for _, group in upcoming_user_list.resample(time_interval_len)]
-
+    train_dfs = [group for _, group in train_df.resample(time_interval_len)]
+    train_history_traffic = [len(i) for i in train_dfs]
 
     user_number = len(upcoming_user_list)
     print(f'{user_number} users arrives')
@@ -365,11 +278,12 @@ def run_baseline(dataset, model):
 
             # user traffic prediction
             # we use gru to predict the future user traffic
-            # history traffic =  [len(i) for i in result_dfs[:day_idx]]
+            history_traffic = train_history_traffic + [len(i) for i in result_dfs[:day_idx]]
+            traffic_pred_model = gru.PredModel(n_step=7, pred_window_len=3)
 
+            daily_user_traffic = traffic_pred_model.excute(history_traffic)
 
             print(f'total estate:{total_estate}')
-            daily_user_traffic = [len(i) for i in result_dfs[day_idx:]]
             sum_user_traffic = sum(daily_user_traffic)
 
 
@@ -414,26 +328,19 @@ def run_baseline(dataset, model):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="run_baseline")
+    parser = argparse.ArgumentParser(description="run_RPF")
     parser.add_argument('--topk', type=int, default=10)
-    parser.add_argument('--lbd', type=float, default=0)
-    parser.add_argument('--epoch', type=int, default=100)
-    parser.add_argument('--start_date', type=str, default='2000-05-01')
-    parser.add_argument('--end_date', type=str, default='2003-01-01')
-    parser.add_argument('--window_size', type=int, default=30)  # yelp_small 60
-    parser.add_argument('--file_path', type=str, default='../data')
-    parser.add_argument('--fairness_model', type=str, default='P-MMF')
-    parser.add_argument('--fairness_type', type=str, default='OF', help='choose among [UF, OF]')
+    parser.add_argument('--start_date', type=str, default='2022-04-22')
+    parser.add_argument('--end_date', type=str, default='2022-05-08')
+    parser.add_argument('--file_path', type=str, default='./temp_data/inter')
+    parser.add_argument('--fairness_model', type=str, default='Bankruptcy')
     parser.add_argument('--alpha', type=float, default=0.4)
-    parser.add_argument('--base_model', '-m', type=str, default='BPR', help='name of models')
-    parser.add_argument('--dataset', '-d', type=str, default='ml-100k', help='name of datasets')
-    parser.add_argument('--config_files', type=str, default=None, help='config files')
+    parser.add_argument('--base_model', '-m', type=str, default='LightGCN', help='name of models')
+    parser.add_argument('--dataset', '-d', type=str, default='KuaiRand-1K', help='name of datasets')
     parser.add_argument('--interval_len', type=str, default='24', help='time interval length')
     parser.add_argument('--total_estate', type=float, default=1000, help='total estate')
     parser.add_argument('--theta', type=float, default=0.25, help='theta of bank')
-    parser.add_argument('--para', type=float, default=0.2, help='fairrec')
     args = parser.parse_args()
-    args.config_files = os.path.join('recbole', 'properties', 'bankruptcy', f'{args.base_model}_{args.dataset}_top{str(args.topk)}.yaml')
     if args.dataset == 'KuaiRand-1K':
         args.start_date = '2022-04-22'
         args.end_date = '2022-05-08'
