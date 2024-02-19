@@ -2,5 +2,6 @@
    learning_rate: 0.01,
    lambda: 10,
    gamma: 0.2,
-   theta: 0.25
+   theta: 0.25,
+   beta: 0.4
 }
