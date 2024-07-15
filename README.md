@@ -1,5 +1,5 @@
 # BankFair model
-This contains the codes of RPF re-ranking model in paper Robust Provider-fair Re-ranking under Fluctuating User Traffic
+This contains the codes of BankFair model in paper Guaranteeing accuracy and fairness under Fluctuating User Traffic
 
 To run RPF, you can run the following command
 
